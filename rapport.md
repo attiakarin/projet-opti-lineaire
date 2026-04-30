@@ -2,6 +2,13 @@
 **ING1-GIA — Semestre 2 — 2025/2026**  
 **TP Durée 4h30**
 
+**Membres du groupe :**
+- Karin Attia
+- Synthia Tiroumourougane
+- Wiame Boudella
+- Marwa Zagliz
+- Djedjiga Yahiaoui
+
 ---
 
 ## 1. Introduction

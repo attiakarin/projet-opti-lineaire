@@ -14,6 +14,7 @@ Usage :
   result = solve_two_phase(c, A, b, verbose=True)
 """
 
+import copy
 import io
 import contextlib
 
@@ -58,8 +59,24 @@ def _pivot_loop(st: SimplexTableau, label: str,
             print(f"{'━'*55}")
             print_tableau(st, title=f"Tableau {label} — itération {it}")
 
-        entering_col = choose_entering_variable(
-            st, verbose=verbose, forbidden_cols=forbidden_cols)
+        # Choix variable entrante (avec exclusion éventuelle)
+        obj_row = st.tableau[-1]
+        num_cols = len(obj_row) - 1
+        min_val, entering_col = 0.0, -1
+        for j in range(num_cols):
+            if forbidden_cols and j in forbidden_cols:
+                continue
+            if obj_row[j] < min_val:
+                min_val = obj_row[j]
+                entering_col = j
+
+        if verbose:
+            if entering_col == -1:
+                print("  → Aucun coefficient négatif : solution optimale de cette phase.\n")
+            else:
+                print(f"  → Variable entrante : {st.var_names[entering_col]}"
+                      f"  (coeff = {min_val:.4f})\n")
+
         if entering_col == -1:
             return st, "optimal"
 
@@ -247,7 +264,7 @@ def solve_two_phase(c, A, b, verbose: bool = True) -> SimplexResult:
     # Vérifier qu'aucune artificielle n'est en base
     # (si c'est le cas on tente de la faire sortir)
     basis2 = st1.basis[:]
-    tab2   = [row[:] for row in st1.tableau]
+    tab2   = copy.deepcopy(st1.tableau)
 
     for row_idx, col_idx in enumerate(basis2):
         if col_idx in art_cols:
