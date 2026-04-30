@@ -36,10 +36,12 @@ class SimplexeApp(tk.Tk):
         self.configure(bg="#f0f0f0")
 
         # État du mode pas à pas
-        self._st        = None   # SimplexTableau courant
-        self._iteration = 0      # numéro d'itération courant
-        self._step_done = False  # True quand fini (optimal / non borné)
-        self._trace_buf = io.StringIO()  # accumule tout le texte pour export
+        self._st           = None   # SimplexTableau courant (simplexe direct)
+        self._iteration    = 0      # numéro d'itération courant
+        self._step_done    = False  # True quand fini (optimal / non borné)
+        self._trace_buf    = io.StringIO()  # accumule tout le texte pour export
+        self._step_chunks  = None   # liste de chunks pré-calculés (autres méthodes)
+        self._step_index   = 0      # indice du prochain chunk à afficher
 
         self._build_ui()
 
@@ -233,10 +235,12 @@ class SimplexeApp(tk.Tk):
         self.text_A.delete("1.0", tk.END)
         self.entry_b.delete(0, tk.END)
         self._set_output("")
-        self._st        = None
-        self._iteration = 0
-        self._step_done = False
-        self._trace_buf = io.StringIO()
+        self._st           = None
+        self._iteration    = 0
+        self._step_done    = False
+        self._step_chunks  = None
+        self._step_index   = 0
+        self._trace_buf    = io.StringIO()
         self.btn_next.config(state=tk.DISABLED)
         self.btn_export.config(state=tk.DISABLED)
         self.lbl_iter.config(text="")
@@ -249,35 +253,150 @@ class SimplexeApp(tk.Tk):
             messagebox.showerror("Erreur de saisie", str(exc))
             return
 
-        if self.method_var.get() in ("deux_phases", "primal_dual", "branch_bound"):
-            messagebox.showinfo(
-                "Mode pas à pas",
-                "Le mode pas à pas est disponible uniquement pour le\n"
-                "simplexe direct. Utilisez \"Résoudre\" pour les autres méthodes.")
-            return
-
-        self._st        = build_initial_tableau(c, A, b)
-        self._iteration = 0
-        self._step_done = False
-        self._trace_buf = io.StringIO()
+        method = self.method_var.get()
+        self._step_done   = False
+        self._step_chunks = None
+        self._step_index  = 0
+        self._trace_buf   = io.StringIO()
         self._trace_buf.write(self._trace_header(c, A, b))
 
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            print("=" * 55)
-            print("   MODE PAS À PAS — SIMPLEXE")
-            print("=" * 55)
-            print_tableau(self._st, title="Tableau initial (itération 0)")
+        if method == "simplexe":
+            # Mode live : un pivot à la fois
+            self._st        = build_initial_tableau(c, A, b)
+            self._iteration = 0
 
-        self._trace_buf.write(buf.getvalue())
-        self._set_output(buf.getvalue())
-        self.btn_next.config(state=tk.NORMAL)
-        self.btn_export.config(state=tk.NORMAL)
-        self.lbl_iter.config(text="Itération 0 — appuyez sur Suivant")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                print("=" * 55)
+                print("   MODE PAS À PAS — SIMPLEXE")
+                print("=" * 55)
+                print_tableau(self._st, title="Tableau initial (itération 0)")
+
+            self._trace_buf.write(buf.getvalue())
+            self._set_output(buf.getvalue())
+            self.btn_next.config(state=tk.NORMAL)
+            self.btn_export.config(state=tk.NORMAL)
+            self.lbl_iter.config(text="Itération 0 — appuyez sur Suivant")
+
+        else:
+            # Mode pré-calculé : générer tout, découper, afficher pas à pas
+            labels = {
+                "deux_phases":  "DEUX PHASES",
+                "primal_dual":  "PRIMAL-DUAL",
+                "branch_bound": "BRANCH & BOUND",
+            }
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                if method == "deux_phases":
+                    result = solve_two_phase(c, A, b, verbose=True)
+                elif method == "primal_dual":
+                    result = solve_primal_dual(c, A, b, verbose=True)
+                else:
+                    result = solve_branch_and_bound(c, A, b, verbose=True)
+
+            full_text = buf.getvalue()
+            self._trace_buf.write(full_text)
+
+            self._step_chunks = self._split_into_steps(full_text, method)
+            self._step_index  = 0
+            self._st          = None
+
+            label = labels.get(method, method)
+            header = f"{'='*55}\n   MODE PAS À PAS — {label}\n{'='*55}\n"
+            self._set_output(header)
+
+            total = len(self._step_chunks)
+            if total == 0:
+                self._step_done = True
+                self.btn_next.config(state=tk.DISABLED)
+                self.lbl_iter.config(text="Aucune étape générée")
+            else:
+                # Affiche le premier chunk (en-tête de la méthode)
+                self._append_output(self._step_chunks[0])
+                self._step_index = 1
+                if self._step_index >= total:
+                    self._step_done = True
+                    self.btn_next.config(state=tk.DISABLED)
+                    self.lbl_iter.config(text="✓ Terminé")
+                else:
+                    self.btn_next.config(state=tk.NORMAL)
+                    self.lbl_iter.config(
+                        text=f"Étape 1/{total} — appuyez sur Suivant")
+
+            self.btn_export.config(state=tk.NORMAL)
+
+    # ------------------------------------------------------------------
+    # Découpage du texte verbose en étapes logiques
+    # ------------------------------------------------------------------
+
+    def _split_into_steps(self, text: str, method: str) -> list:
+        """
+        Découpe le texte verbose d'une méthode en une liste de chunks,
+        chaque chunk correspondant à une étape logique (itération / noeud).
+
+        Séparateurs détectés (non indentés) :
+          deux_phases  → lignes de '━' (≥ 50 car.)
+          primal_dual  → lignes de '-' (≥ 50 car.)
+          branch_bound → lignes de '─' (≥ 50 car.)
+        """
+        if method == "deux_phases":
+            sep_char, min_len = "━", 50
+        elif method == "primal_dual":
+            sep_char, min_len = "-", 50
+        else:  # branch_bound
+            sep_char, min_len = "─", 50
+
+        chunks  = []
+        current = []
+
+        for line in text.splitlines(keepends=True):
+            stripped = line.rstrip("\r\n")
+            is_sep = (
+                not line.startswith((" ", "\t"))
+                and stripped.startswith(sep_char)
+                and len(stripped) >= min_len
+            )
+            if is_sep and current:
+                chunks.append("".join(current))
+                current = [line]
+            else:
+                current.append(line)
+
+        if current:
+            chunks.append("".join(current))
+
+        return [c for c in chunks if c.strip()]
 
     def _on_step_next(self):
-        """Effectue une seule itération du simplexe et affiche le résultat."""
-        if self._st is None or self._step_done:
+        """Effectue une seule itération et affiche le résultat."""
+        if self._step_done:
+            return
+
+        # ── Mode pré-calculé (deux_phases / primal_dual / branch_bound) ──
+        if self._step_chunks is not None:
+            if self._step_index >= len(self._step_chunks):
+                self._step_done = True
+                self.btn_next.config(state=tk.DISABLED)
+                self.lbl_iter.config(text="✓ Terminé")
+                return
+
+            chunk = self._step_chunks[self._step_index]
+            self._append_output(chunk)
+            self.output_text.see(tk.END)
+            self._step_index += 1
+
+            total = len(self._step_chunks)
+            if self._step_index >= total:
+                self._step_done = True
+                self.btn_next.config(state=tk.DISABLED)
+                self.lbl_iter.config(text="✓ Terminé")
+            else:
+                self.lbl_iter.config(
+                    text=f"Étape {self._step_index}/{total} — appuyez sur Suivant")
+            return
+
+        # ── Mode live — simplexe direct ───────────────────────────────────
+        if self._st is None:
             return
 
         buf = io.StringIO()
